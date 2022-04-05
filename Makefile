@@ -1,6 +1,6 @@
-build: so-stdio.o
-	cl -shared so-stdio.o -o libso_stdio.so
-so-stdio.o: so-stdio.c
-	gcc -fPIC -c so-stdio.c -o so-stdio.o
+build: so-stdio.obj
+	link /nologo /dll /out:so_stdio.dll /implib:so_stdio.lib so-stdio.obj
+so-stdio.obj: so-stdio.c
+	cl /c so-stdio.c
 clean:
 	rm -rf *.o *.so

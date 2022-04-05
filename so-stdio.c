@@ -1,13 +1,17 @@
+#define DLL_EXPORTS
 #include "so_stdio.h"
 #include <windows.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 /*#include <fileapi.h>*/
 
 struct _so_file {
 	/* variable for storing the file descriptor */
 	HANDLE fd;
 	/* variable for storing the pid of the child proccess ( if needed) */
-	int pid;
+	PROCESS_INFORMATION pid;
 	/* variable for storing the data read from a file or data that needs */
 	/* to be written to a file */
 	unsigned char *buffer;
@@ -44,17 +48,17 @@ SO_FILE *so_fopen(const char *pathname, const char *mode)
 
 	/* open the file with the corresponding permissions */
 	if (strcmp(mode, "r+") == 0)
-		aux->fd = CreateFile(pathname, GENERIC_READ | GENERIC_WRITE, NULL, OPEN_EXISTING, NULL, NULL);/*pen(pathname, O_RDWR);*/
+		aux->fd = CreateFile(pathname, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 	else if (strcmp(mode, "w+") == 0)
-		aux->fd = open(pathname, O_RDWR | O_CREAT | O_TRUNC);
+		aux->fd = CreateFile(pathname, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 	else if (strcmp(mode, "a+") == 0)
-		aux->fd = open(pathname, O_RDWR | O_CREAT | O_APPEND);
+		aux->fd = CreateFile(pathname, GENERIC_READ | FILE_APPEND_DATA,	FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 	else if (strcmp(mode, "r") == 0)
-		aux->fd = open(pathname, O_RDONLY);
+		aux->fd = CreateFile(pathname, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 	else if (strcmp(mode, "w") == 0)
-		aux->fd = open(pathname, O_WRONLY | O_CREAT | O_TRUNC);
+		aux->fd = CreateFile(pathname, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 	else if (strcmp(mode, "a") == 0)
-		aux->fd = open(pathname, O_WRONLY | O_APPEND | O_CREAT);
+		aux->fd = CreateFile(pathname, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 	else {
 		/* if the mode isn't one of the above, return NULL */
 		free(aux);
@@ -84,7 +88,10 @@ SO_FILE *so_fopen(const char *pathname, const char *mode)
  * @param stream the SO_FILE structure
  * @return the file descriptor of a give SO_FILE structure
  */
-HANDLE so_fileno(SO_FILE *stream) { return stream->fd; }
+HANDLE so_fileno(SO_FILE *stream) 
+{ 
+	return stream->fd; 
+}
 
 /**
  * @brief This function frees the SO_FILE data structure and closes the
@@ -107,7 +114,7 @@ int so_fclose(SO_FILE *stream)
 		return_value = SO_EOF;
 	/* close the file descriptor */
 	/* if there was an error during closing, return -1 */
-	if (CloseHandle(stream->fd))
+	if (!CloseHandle(stream->fd))
 		return_value = SO_EOF;
 	/* free the buffer */
 	free(stream->buffer);
@@ -130,18 +137,20 @@ int so_fflush(SO_FILE *stream)
 	/* check if there is data in the buffer and if the last operation */
 	/* on the structure was a write one */
 	if (stream->start > 0 && stream->last_operation == 2) {
-
+		BOOL ret;
 		int bytes_to_dump = stream->start;
 		int bytes_wrote;
 		/* while there are still bytes that need to be written, try to
 		 */
 		/* write them in the file */
 		while (bytes_to_dump) {
-			bytes_wrote = write(stream->fd,
+			/*bytes_wrote = write(stream->fd,
 					    (stream->buffer) + stream->start -
 						bytes_to_dump,
-					    bytes_to_dump);
-			if (bytes_wrote == -1) {
+					    bytes_to_dump);*/
+			ret = WriteFile(stream->fd, (stream->buffer) + stream->start -
+						bytes_to_dump, bytes_to_dump, &bytes_wrote, NULL);
+			if (ret == FALSE) {
 				stream->start = 0;
 				stream->error = 2;
 				return SO_EOF;
@@ -172,6 +181,7 @@ int so_fflush(SO_FILE *stream)
  */
 int so_fseek(SO_FILE *stream, long offset, int whence)
 {
+	int val;
 	/* if the last operation was a write */
 	if (stream->last_operation == 2) {
 		/* write the buffered bytes to the file */
@@ -184,10 +194,11 @@ int so_fseek(SO_FILE *stream, long offset, int whence)
 	else if (stream->last_operation == 1) {
 		/* move the offset of the open channel structure to the last */
 		/* character that was put in the buffer but not read */
-		int aux = lseek(stream->fd, stream->start - stream->len_read,
-				SEEK_CUR);
+		long aux = SetFilePointer(stream->fd, stream->start - stream->len_read, NULL, FILE_CURRENT); /*lseek(stream->fd, stream->start - stream->len_read,
+				SEEK_CUR);*/
+				
 		/* return -1 in case of failure */
-		if (aux < -1)
+		if (aux == INVALID_SET_FILE_POINTER)
 			return SO_EOF;
 		/* reset the starting positions of the buffer */
 		stream->start = 0;
@@ -197,9 +208,9 @@ int so_fseek(SO_FILE *stream, long offset, int whence)
 	 */
 	stream->last_operation = 0;
 	/* move to the position given as argument */
-	int val = lseek(stream->fd, offset, whence);
+	val = SetFilePointer(stream->fd, offset, NULL, whence);
 	/* return -1 in case of error */
-	if (val < -1)
+	if (val == INVALID_SET_FILE_POINTER)
 		return SO_EOF;
 	return 0;
 }
@@ -217,7 +228,7 @@ long so_ftell(SO_FILE *stream)
 	so_fseek(stream, 0, SEEK_CUR);
 	/* return the offset, zero positions to the right of the current offset
 	 */
-	return lseek(stream->fd, 0, SEEK_CUR);
+	return SetFilePointer(stream->fd, 0, NULL, SEEK_CUR);/*lseek(stream->fd, 0, SEEK_CUR);*/
 }
 
 /**
@@ -249,7 +260,7 @@ size_t so_fread(void *ptr, size_t size, size_t nmemb, SO_FILE *stream)
 		/* reading or we reached the end of file, stop copying bytes */
 		if (stream->error == 1 || stream->error == 2)
 			break;
-		memcpy(ptr + aux, (stream->buffer) + (stream->start - 1), 1);
+		memcpy(((unsigned char *)ptr) + aux, (stream->buffer) + (stream->start - 1), 1);
 		aux++;
 	}
 	/* if there was an error, return 0 */
@@ -304,20 +315,22 @@ int so_fgetc(SO_FILE *stream)
 	/* we need to read bytes again */
 	if (stream->start == stream->len_read) {
 		int bytes_read;
-
+		BOOL ret;
 		stream->start = 0;
 		stream->len_read = 0;
 		/* read bytes_read bytes */
-		bytes_read = read(stream->fd, stream->buffer, 4096);
+		ret = ReadFile(stream->fd, stream->buffer, 4096, &bytes_read, NULL);
+		//bytes_read = read(stream->fd, stream->buffer, 4096);
+
 		/* mark the last operation as a read one */
 		stream->last_operation = 1;
 		/* if we received 0 bytes, we reached EOF */
-		if (bytes_read == 0) {
+		if (ret == TRUE && bytes_read == 0) {
 			stream->error = 1;
 			return SO_EOF;
 		}
 		/* if bytes_read is -1, that means there was an error */
-		else if (bytes_read == -1) {
+		else if (ret == FALSE) {
 			stream->error = 2;
 			return SO_EOF;
 		}
@@ -406,6 +419,41 @@ int so_ferror(SO_FILE *stream)
 }
 
 /**
+ * @brief 
+ * 
+ * @param psi 
+ * @param hFile 
+ * @param opt 
+ * @return VOID 
+ */
+static VOID RedirectHandle(STARTUPINFO *psi, HANDLE hFile, INT opt)
+{
+	if (hFile == INVALID_HANDLE_VALUE)
+		return;
+
+	ZeroMemory(psi, sizeof(*psi));
+	psi->cb = sizeof(*psi);
+
+	psi->hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+	psi->hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+	psi->hStdError = GetStdHandle(STD_ERROR_HANDLE);
+
+	psi->dwFlags |= STARTF_USESTDHANDLES;
+
+	switch (opt) {
+	case STD_INPUT_HANDLE:
+		psi->hStdInput = hFile;
+		break;
+	case STD_OUTPUT_HANDLE:
+		psi->hStdOutput = hFile;
+		break;
+	case STD_ERROR_HANDLE:
+		psi->hStdError = hFile;
+		break;
+	}
+}
+
+/**
  * @brief This function creates a new proccess that executes the command given
  * as argument. It returns a SO_FILE data structure based on the type argument.
  *
@@ -416,81 +464,7 @@ int so_ferror(SO_FILE *stream)
  */
 SO_FILE *so_popen(const char *command, const char *type)
 {
-	SO_FILE *stream;
-	int channel[2];
-	int pid;
-
-	/* reserve memory for a SO_FILE data structure */
-	stream = (SO_FILE *)calloc(1, sizeof(SO_FILE));
-	/* if there was a problem, return NULL */
-	if (stream == NULL)
-		return NULL;
-	/* reserve memory for the read/write buffer */
-	stream->buffer = (unsigned char *)calloc(4096, sizeof(unsigned char));
-
-	/* create the pipe used for communication between the child and parent
-	 */
-	/* proccess */
-	if (pipe(channel)) {
-		/* if there was a problem in creating the pipe, free the memory
-		 */
-		/* and return NULL */
-		free(stream->buffer);
-		free(stream);
-		return NULL;
-	}
-
-	/* assign the fd of the SO_FILE data structure based on the type */
-	/* argument */
-	if (!strcmp(type, "r"))
-		stream->fd = channel[0];
-	else if (!strcmp(type, "w"))
-		stream->fd = channel[1];
-
-	/* create the child proccess */
-	pid = fork();
-
-	/* if the fork failed */
-	if (pid == -1) {
-		/* close the pipe, free the structure and return NULL */
-		close(channel[0]);
-		close(channel[1]);
-		free(stream->buffer);
-		free(stream);
-		return NULL;
-	}
-	/* if the proccess is the child proccess */
-	else if (pid == 0) {
-		/* if the type is "r", close the read end of the pipe */
-		/* then redirect the stdout of the child proccess to the write
-		 */
-		/* end of the pipe */
-		if (!strcmp(type, "r")) {
-			close(channel[0]);
-			dup2(channel[1], STDOUT_FILENO);
-		}
-		/* if the type is "w", close the write end of the pipe */
-		/* then redirect the stdin of the child proccess to the read */
-		/* end of the pipe */
-		else {
-			close(channel[1]);
-			dup2(channel[0], STDIN_FILENO);
-		}
-		/* exec the command in the child proccess */
-		/* return NULL if the exec fails */
-		if (execlp("sh", "sh", "-c", command, NULL))
-			return NULL;
-	} else {
-		/* if the proccess is the parent proccess */
-		stream->pid = pid;
-
-		/* if the type is "r", close the write end of the pipe */
-		if (!strcmp(type, "r"))
-			close(channel[1]);
-		else
-			close(channel[0]);
-	}
-	return stream;
+	
 }
 
 /**
@@ -503,24 +477,5 @@ SO_FILE *so_popen(const char *command, const char *type)
  */
 int so_pclose(SO_FILE *stream)
 {
-	int status, aux;
-	int pid = stream->pid;
-	int fd = stream->fd;
-
-	/* flush the buffer if needed */
-	aux = so_fflush(stream);
-
-	free(stream->buffer);
-	free(stream);
-	/* return -1 if there was a problem with the writing */
-	if (aux == -1)
-		return aux;
-	close(fd);
-
-	/* wait for the child proccess to finish */
-	aux = waitpid(pid, &status, 0);
-	if (aux < 0)
-		return -1;
-
-	return status;
+	
 }
